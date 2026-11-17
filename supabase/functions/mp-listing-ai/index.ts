@@ -1,31 +1,37 @@
-// MP MARKET AI — deployed as Supabase Edge Function mp-listing-ai.
-// Set OPENAI_API_KEY as a Supabase Edge Function secret. Never commit it.
 import { createClient } from 'npm:@supabase/supabase-js@2.90.1';
-const cors = {'Access-Control-Allow-Origin':'*','Access-Control-Allow-Headers':'authorization, x-client-info, apikey, content-type','Access-Control-Allow-Methods':'POST,OPTIONS'};
-const json = (obj:unknown,status=200)=>new Response(JSON.stringify(obj),{status,headers:{...cors,'Content-Type':'application/json'}});
-Deno.serve(async req=>{
- if(req.method==='OPTIONS') return new Response('ok',{headers:cors});
- if(req.method!=='POST')return json({error:'Method not allowed'},405);
- const token=req.headers.get('Authorization');
- if(!token?.startsWith('Bearer '))return json({error:'Sign in first'},401);
- const db=createClient(Deno.env.get('SUPABASE_URL')!,Deno.env.get('SUPABASE_ANON_KEY')!,{global:{headers:{Authorization:token}}});
+const cors={'Access-Control-Allow-Origin':'*','Access-Control-Allow-Headers':'authorization, x-client-info, apikey, content-type','Access-Control-Allow-Methods':'POST,OPTIONS'};
+const respond=(data:unknown,status=200)=>new Response(JSON.stringify(data),{status,headers:{...cors,'Content-Type':'application/json'}});
+Deno.serve(async(req)=>{
+ if(req.method==='OPTIONS')return new Response('ok',{headers:cors});
+ if(req.method!=='POST')return respond({error:'Method not allowed'},405);
+ const auth=req.headers.get('Authorization');
+ if(!auth?.startsWith('Bearer '))return respond({error:'Sign in first'},401);
+ const db=createClient(Deno.env.get('SUPABASE_URL')!,Deno.env.get('SUPABASE_ANON_KEY')!,{global:{headers:{Authorization:auth}}});
  const {data:{user},error}=await db.auth.getUser();
- if(error||!user)return json({error:'Unauthorized'},401);
- let body:{prompt?:string;purpose?:string};
- try{body=await req.json()}catch{return json({error:'Invalid JSON'},400)}
- const prompt=String(body.prompt||'').trim();
- if(!prompt||prompt.length>2000)return json({error:'Prompt must be between 1 and 2000 characters'},400);
+ if(error||!user)return respond({error:'Unauthorized'},401);
+ let payload:{prompt?:string;purpose?:string};
+ try{payload=await req.json()}catch{return respond({error:'Invalid JSON'},400)}
+ const prompt=String(payload.prompt||'').trim();
+ if(!prompt||prompt.length>2000)return respond({error:'Prompt must be 1–2000 characters'},400);
+ const purpose=payload.purpose==='polish'?'polish':'chat';
  const key=Deno.env.get('OPENAI_API_KEY');
- if(!key)return json({error:'AI key not configured'},503);
- const {data:live}=await db.from('mp_listings').select('title,price,location,category,condition').eq('status','active').limit(35);
- const instructions=body.purpose==='polish'
-  ? 'Polish marketplace product descriptions using only facts supplied by the seller. Never invent specs, warranty, defects or prices. Return only the final description under 150 words.'
-  : 'You are MP AI for MP MARKET in Mpumalanga, South Africa. Only suggest products actually in the supplied live listing data. Never fabricate sellers, prices, listings or guarantees. Offer helpful, concise advice about scams and safe buying. Live listings: '+JSON.stringify(live||[]).slice(0,10000);
+ if(!key)return respond({error:'OPENAI_API_KEY not configured'},503);
+ const {data:listings}=await db.from('mp_listings').select('title,price,location,category,condition').eq('status','active').limit(35);
+ const system=purpose==='polish'?'You edit South African marketplace product descriptions. Preserve only the facts supplied by the seller. Never fabricate specifications, condition, warranties, accessories, or prices. Return only a clear description under 150 words.':'You are MP AI for MP MARKET in Mpumalanga South Africa. Suggest only actual marketplace listings in this supplied set, and never invent listings, seller identities, availability, prices, or guarantees. Give practical fraud prevention advice. If no matches, say so. Current live marketplace listings: '+JSON.stringify(listings||[]).slice(0,10000);
  try{
-  const r=await fetch('https://api.openai.com/v1/chat/completions',{method:'POST',headers:{Authorization:'Bearer '+key,'Content-Type':'application/json'},body:JSON.stringify({model:'gpt-4.1-mini',temperature:0.2,max_tokens:400,messages:[{role:'system',content:instructions},{role:'user',content:prompt}]})});
-  if(!r.ok)return json({error:'AI service temporarily unavailable'},502);
-  const result=await r.json();
-  const reply=result.choices?.[0]?.message?.content;
-  return reply?json({reply}):json({error:'Empty AI response'},502);
- }catch{return json({error:'AI temporarily unavailable'},503)}
+  const r=await fetch('https://api.openai.com/v1/chat/completions',{method:'POST',headers:{Authorization:'Bearer '+key,'Content-Type':'application/json'},body:JSON.stringify({model:'gpt-4.1-mini',messages:[{role:'system',content:system},{role:'user',content:prompt}],max_tokens:400,temperature:0.2})});
+  if(!r.ok){
+   let code='provider_error';
+   try{const details=await r.json(); code=String(details?.error?.code||details?.error?.type||code).slice(0,80)}catch{}
+   console.error('MP AI upstream request failed',{httpStatus:r.status,code});
+   const message=r.status===401?'OpenAI API key rejected. Check the key in Supabase Secrets.'
+    :r.status===429?(code==='insufficient_quota'?'OpenAI API credits or billing are unavailable. Check your API billing and usage limits.':'OpenAI rate limit reached. Please try again later.')
+    :r.status===403?'OpenAI project permissions do not allow this request.'
+    :r.status===400?'AI request rejected. Check the configured model and project access.'
+    :'AI service returned HTTP '+r.status+'. Please check Edge Function logs.';
+   return respond({error:message,provider_status:r.status,provider_code:code},502)
+  }
+  const j=await r.json();const reply=j.choices?.[0]?.message?.content;
+  return reply?respond({reply}):respond({error:'No AI response'},502)
+ }catch{return respond({error:'AI temporarily unavailable'},503)}
 });
