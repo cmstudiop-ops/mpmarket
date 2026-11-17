@@ -25,7 +25,7 @@ Deno.serve(async(req)=>{
    try{const details=await r.json(); code=String(details?.error?.code||details?.error?.type||code).slice(0,80)}catch{}
    console.error('MP AI upstream request failed',{httpStatus:r.status,code});
    const message=r.status===401?'OpenAI API key rejected. Check the key in Supabase Secrets.'
-    :r.status===429?(code==='insufficient_quota'?'OpenAI API credits or billing are unavailable. Check your API billing and usage limits.':'OpenAI rate limit reached. Please try again later.')
+    :r.status===429?(['insufficient_quota','credit_balance_exhausted'].includes(code)?'OpenAI API credits are unavailable. Add API credits or check your API billing balance.':'OpenAI rate limit reached. Please try again later.')
     :r.status===403?'OpenAI project permissions do not allow this request.'
     :r.status===400?'AI request rejected. Check the configured model and project access.'
     :'AI service returned HTTP '+r.status+'. Please check Edge Function logs.';
